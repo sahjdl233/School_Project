@@ -1,10 +1,18 @@
 import javax.swing.*;
+import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.table.TableCellEditor;
+import javax.swing.table.TableCellRenderer;
 import java.sql.*;
 import java.awt.*;
 import java.awt.event.*;
 import java.util.ArrayList;
 import java.util.List;
+import java.awt.event.ActionEvent;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.util.concurrent.ExecutionException;
 
 
 /*—————————————————————————————————————分割线———————————————————————————————————*/
@@ -592,7 +600,7 @@ class Frame6_4 extends JFrame //删除宿舍成员
             }
         });
         add(combinedPanel2, BorderLayout.NORTH); // 将subPanel1放在框架的北部
-        add(subPanel3, BorderLayout.CENTER); // 将subPanel3放在框架的中部（注意：这里原本是subPanel2，但我按照您的代码修改了）
+        add(subPanel3, BorderLayout.CENTER); // 将subPanel3放在框架的中部
         add(button, BorderLayout.SOUTH); // 将按钮放在框架的南部
 
         setLocationRelativeTo(null);//居中——还要我说几遍
@@ -638,67 +646,142 @@ class Frame6_5 extends JFrame //添加宿舍
         setLocationRelativeTo(null);//居中——还要我说几遍
     }
 }
-class Frame6_6 extends JFrame //查看报修信息
-{
+
+
+
+class Frame6_6 extends JFrame {
+    // ... 构造函数和其他成员变量 ...
+
     public Frame6_6() {
         setTitle("查看报修信息");
         setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
         setSize(400, 300);
         setLayout(new BorderLayout());
+        setLocationRelativeTo(null); // 居中显示窗口
 
         // 使用SwingWorker在后台线程中执行数据库查询
-        SwingWorker<Void, Void> worker = new SwingWorker<Void, Void>() {
+        SwingWorker<Void, List<Object[]>> worker = new SwingWorker<Void, List<Object[]>>() {
             @Override
             protected Void doInBackground() throws Exception {
-                String sql = "SELECT DISTINCT 宿舍名, 报修信息 FROM Dormitory WHERE 报修信息 IS NOT NULL";
-                try (Connection conn = Database.dbConn;
-                     PreparedStatement ps = conn.prepareStatement(sql);
-                     ResultSet rs = ps.executeQuery()) {
+                String sqlQuery = "SELECT DISTINCT 宿舍名, 报修信息 FROM Dormitory WHERE 报修信息 IS NOT NULL";
+                List<Object[]> rows = new ArrayList<>();
+                Connection conn = null;
+                PreparedStatement ps = null;
+                ResultSet rs = null;
 
-                    // 创建一个临时表模型来存储查询结果（注意：这应该在EDT中完成，但我们可以先准备数据）
-                    final List<Object[]> rows = new ArrayList<>();
+                try {
+                    conn = Database.dbConn;
+                    ps = conn.prepareStatement(sqlQuery);
+                    rs = ps.executeQuery();
 
                     while (rs.next()) {
                         Object[] row = {
                                 rs.getString("宿舍名"),
-                                rs.getString("报修信息")
+                                rs.getString("报修信息"),
+                                false // 添加一个布尔值来表示是否选中删除
                         };
                         rows.add(row);
                     }
-
-                    // 在EDT中更新UI
-                    SwingUtilities.invokeLater(() -> {
-                        if (!rows.isEmpty()) {
-                            DefaultTableModel tableModel = new DefaultTableModel(new String[]{"宿舍名", "报修信息"}, 0);
-                            for (Object[] row : rows) {
-                                tableModel.addRow(row);
-                            }
-
-                            JTable table = new JTable(tableModel);
-                            JScrollPane scrollPane = new JScrollPane(table);
-                            JDialog dialog = new JDialog(Frame6_6.this, "宿舍信息", true);
-                            dialog.add(scrollPane, BorderLayout.CENTER);
-                            dialog.setSize(400, 300);
-                            dialog.setLocationRelativeTo(Frame6_6.this);
-                            dialog.setVisible(true);
-                        } else {
-                            JOptionPane.showMessageDialog(Frame6_6.this, "暂无报修信息");
-                        }
-                    });
-
                 } catch (SQLException ex) {
                     // 在EDT中显示错误信息
                     SwingUtilities.invokeLater(() -> {
                         JOptionPane.showMessageDialog(Frame6_6.this, "查询报修信息时发生错误: " + ex.getMessage(), "数据库错误", JOptionPane.ERROR_MESSAGE);
                     });
                 }
+                // 发布查询结果到EDT
+                publish(rows);
                 return null;
+            }
+
+            @Override
+            protected void process(List<List<Object[]>> chunks) {
+                List<Object[]> rows = chunks.get(0);
+
+                // 在EDT中更新UI
+                if (!rows.isEmpty()) {
+                    DefaultTableModel tableModel = new DefaultTableModel(new String[]{"宿舍名", "报修信息", "删除"}, 0);
+                    for (Object[] row : rows) {
+                        tableModel.addRow(row);
+                    }
+
+                    JTable table = new JTable(tableModel) {
+                        @Override
+                        public TableCellEditor getCellEditor(int row, int column) {
+                            if (column == 2) { // 如果是删除列，则返回JCheckBox的编辑器
+                                JCheckBox checkBox = new JCheckBox();
+                                checkBox.setSelected((Boolean) getValueAt(row, column));
+                                return new DefaultCellEditor(checkBox);
+                            }
+                            return super.getCellEditor(row, column);
+                        }
+
+                        @Override
+                        public boolean isCellEditable(int row, int column) {
+                            return column == 2; // 只有删除列是可编辑的
+                        }
+                    };
+
+                    JScrollPane scrollPane = new JScrollPane(table);
+                    JButton deleteButton = new JButton("删除选中的报修信息");
+
+                    deleteButton.addActionListener(e -> {
+                        // 在后台线程中执行删除操作
+                        new SwingWorker<Void, Void>() {
+                            @Override
+                            protected Void doInBackground() throws Exception {
+                                for (int i = 0; i < table.getRowCount(); i++) {
+                                    if ((Boolean) table.getValueAt(i, 2)) { // 如果选中删除
+                                        String dormName = (String) table.getValueAt(i, 0);
+                                        executeUpdate(dormName);
+                                    }
+                                }
+                                return null;
+                            }
+
+                            @Override
+                            protected void done() {
+                                try {
+                                    get(); // 确保没有异常发生
+                                    JOptionPane.showMessageDialog(Frame6_6.this, "删除成功");
+                                    // 这里可以重新查询数据库以更新表格，或者关闭对话框等
+                                } catch (InterruptedException | ExecutionException ex) {
+                                    // 处理异常
+                                    JOptionPane.showMessageDialog(Frame6_6.this, "删除失败: " + ex.getCause().getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
+                                }
+                            }
+
+                            private void executeUpdate(String dormName) throws SQLException {
+                                String sqlUpdate = "UPDATE Dormitory SET 报修信息 = NULL WHERE 宿舍名 = ?";
+                                Connection conn = Database.dbConn;
+                                PreparedStatement ps = null;
+                                try {
+                                    ps = conn.prepareStatement(sqlUpdate);
+                                    ps.setString(1, dormName);
+                                    ps.executeUpdate();
+                                } catch (SQLException ex) {
+                                    // 处理异常
+                                    throw ex;
+                                }
+                            }
+                        }.execute();
+                    });
+
+                    JPanel panel = new JPanel(new BorderLayout());
+                    panel.add(scrollPane, BorderLayout.CENTER);
+                    panel.add(deleteButton, BorderLayout.SOUTH);
+
+                    JDialog dialog = new JDialog(Frame6_6.this, "宿舍报修信息", true);
+                    dialog.add(panel);
+                    dialog.setSize(500, 400); // 可能需要调整大小以适应内容
+                    dialog.setLocationRelativeTo(Frame6_6.this);
+                    dialog.setVisible(true);
+                } else {
+                    JOptionPane.showMessageDialog(Frame6_6.this, "暂无报修信息");
+                }
             }
         };
 
         // 启动SwingWorker
         worker.execute();
-
-        setLocationRelativeTo(null); // 居中显示窗口
     }
 }
